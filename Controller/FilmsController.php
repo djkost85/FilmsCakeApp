@@ -12,6 +12,12 @@
 App::uses('ImdbRetrieve', 'Imdb');
 App::uses('StatsImageGenerator', 'ImgGen');
 
+// testing
+//App::uses('ImdbData', 'ImdbData');
+//App::build(array('Lib' => array(APP . 'Lib' . DS . 'ImdbData' . DS)));
+App::build(array('ImdbData' => array('%s' . 'Lib' . DS . 'ImdbData' . DS)), App::REGISTER);
+App::uses('ImdbDataFactory', 'ImdbData');
+
 /**
  * Film controller (MVC component)
  *
@@ -281,7 +287,7 @@ class FilmsController extends AppController
      * @param  mixed $id            the id code of the film to get/edit imdb data for
      * @param  boolean $retrieve    whether IMDb data should be retrieved from the website    
      * @return mixed                for redirects
-     * @throws NotFoundException if $id does not match an existing object
+     * @throws NotFoundException
      * @see    /lib/Cake/Controller/Controller.php
      */
     public function imdb($id = null, $retrieve = false)
@@ -297,6 +303,7 @@ class FilmsController extends AppController
 
         // retrieve data? if not, just show/edit
         if ($retrieve) {
+
             // get current data for film (with associated models)
             $imdb = $this->Film->field('imdb');
 
@@ -309,14 +316,15 @@ class FilmsController extends AppController
             }
 
             // start imdb lib function, get data from IMDb
-            $imdbRetrieve = new ImdbRetrieve();
-            $data = $imdbRetrieve->getData( $imdb );
+            //      to use another way to grab the data, call createImdbDataJson (or build more and use those)
+            $imdbData = ImdbDataFactory::createImdbDataHtml($imdb);
+            $imdbData->getAndInterpretData();
 
             // error? set status
-            if (!empty($data["error"])) {
+            if ($imdbData->error !== false) {
                 $this->Session->setFlash(
-                    __('Error retrieving IMDb data: %s.', $data["error"]), 
-                    'default', array('class' => 'message error')
+                    __('Error retrieving IMDb data: %s.', $imdbData->error), 
+                        'default', array('class' => 'message error')
                 );
 
                 // remember that we received an error, and thus don't have proper IMDb data for this film
@@ -324,8 +332,8 @@ class FilmsController extends AppController
                 return $this->redirect(array('action' => 'edit', $id));
             }
 
-            // store CakePHP-savable data in $imdb_data array
-            $imdb_data = array(
+            // save as CakePHP-savable data
+            $store_data = array(
                 'imdb_status' =>  Configure::read('imdbStatuses.fulldata'),
                 'imdb_trivia' =>  '',
                 'imdb_langs' =>   '',
@@ -335,53 +343,45 @@ class FilmsController extends AppController
             );
 
             // store CakePHP savable data for associated models
-            $imdb_data_assoc = array(
+            $store_data_assoc = array(
                 'id' =>         $id,
                 'Director' =>   array(),
                 'ActorRole' =>  array(),
             );
 
-            // imdb rating/grade
-            if (!empty($data['rating'])) {
-                $imdb_data['imdb_grade'] = $data['rating'];
+
+            // get basic properties 1-to-1
+            foreach(array(
+                    'title' =>  'title',
+                    'year' =>   'year',
+                    'grade' =>  'rating',
+                ) as $propStoreData => $propImdbData
+            ) {
+                $store_data['imdb_' . $propStoreData] = $imdbData->getProperty($propImdbData);
             }
 
-            // title, year
-            if (!empty($data['title'])) {
-                $imdb_data['imdb_title'] = $data['title'];
+            // get array list properties and implode
+            foreach(array(
+                    'genres' =>     'genres',
+                    'langs' =>      'languages',
+                    'country' =>    'countries',
+                    'color' =>      'colors',
+                ) as $propStoreData => $propImdbData
+            ) {
+                $store_data['imdb_' . $propStoreData] = implode(';', $imdbData->getProperty($propImdbData));
             }
 
-            if (!empty($data['year'])) {
-                $imdb_data['imdb_year'] = $data['year'];
-            }
-
-            // genres
-            if (!empty($data['genres'])) {
-                $imdb_data['imdb_genres'] = implode( ';', $data['genres'] );
-            }
-
-            // languages
-            if (!empty($data['languages'])) {
-                $imdb_data['imdb_langs'] = implode( ';', $data['languages'] );
-            }
-
-            // countries
-            if (!empty($data['countries'])) {
-                $imdb_data['imdb_country'] = implode( ';', $data['countries'] );
-            }
-
-            // color
-            if (!empty($data['colors'])) {
-                $imdb_data['imdb_color'] = implode( ';', $data['colors'] );
-            }
+            $directors = $imdbData->getProperty('directors');
+            $cast = $imdbData->getProperty('cast');
 
             // partial data or not?
-            if (empty($data['cast'])) {
+            if (empty($cast) && empty($directors)) {
                 $imdb_data['imdb_status'] = Configure::read('imdbStatuses.partialdata');
             } else {
                 // fix directors
-                if (!empty($data['cast']['directors'])) {
-                    foreach ($data['cast']['directors'] as $dir) {
+                if (!empty($directors)) {
+
+                    foreach ($directors as $dir) {
                         // find the id code of the person
                         $dir_id = null;
 
@@ -398,7 +398,7 @@ class FilmsController extends AppController
                             }
                         }
 
-                        $imdb_data_assoc["Director"][] = array(
+                        $store_data_assoc["Director"][] = array(
                             'id' =>         $dir_id,
                             'imdb_id' =>    $dir['id'],
                             'name' =>       $dir['name'],
@@ -408,14 +408,10 @@ class FilmsController extends AppController
                     }
                 }
 
-                //echo "<pre>";
-                //print_r($data['cast']['actors']);
-                //echo "</pre>";
-
                 // fix actors
-                if (!empty($data['cast']['actors'])) {
+                if (!empty($cast)) {
                     $actcnt = 0;
-                    foreach ($data['cast']['actors'] as $act) {
+                    foreach ($cast as $act) {
                         // find the id code of the person
                         $act_id = null;
                         $act_found = $this->Actor->find('first', array(
@@ -426,7 +422,7 @@ class FilmsController extends AppController
                             $act_id = $act_found['Actor']['id'];
                         }
 
-                        $imdb_data_assoc["ActorRole"][$actcnt] = array(
+                        $store_data_assoc["ActorRole"][$actcnt] = array(
                             'Actor' => array(
                                 'imdb_id' =>  $act['id'],
                                 'name' =>     $act['name'],
@@ -436,7 +432,7 @@ class FilmsController extends AppController
                         );
 
                         if ($act_id !== null) {
-                            $imdb_data_assoc["ActorRole"][$actcnt]['Actor']['id'] = $act_id;
+                            $store_data_assoc["ActorRole"][$actcnt]['Actor']['id'] = $act_id;
                         }
 
                         $actcnt++;
@@ -445,16 +441,13 @@ class FilmsController extends AppController
             }
 
             // trivia
-            if (!empty($data['trivia'])) {
-                $imdb_data['imdb_trivia'] = implode("\n\n", array_values($data['trivia']));
+            $trivia = $imdbData->getProperty('trivia');
+            if (!empty($trivia)) {
+                $store_data['imdb_trivia'] = implode("\n\n", array_values($trivia));
             }
 
-            // debug print
-            //debug($imdb_data);
-            //return;
-
             // save all relevant fields
-            if (!$this->Film->save($imdb_data, false, array(
+            if (!$this->Film->save($store_data, false, array(
                     'imdb_status',
                     'imdb_title',
                     'imdb_year',
@@ -476,30 +469,19 @@ class FilmsController extends AppController
             $this->Film->ActorRole->deleteAll(array('ActorRole.film_id' => $id), false);
 
             // save associated data (actors and directors)
-            if (!$this->Film->saveAssociated($imdb_data_assoc, array('deep' => true))) {
+            if (!$this->Film->saveAssociated($store_data_assoc, array('deep' => true))) {
                 $this->Session->setFlash(
                     __('The directors/actors for the film could not be saved.'), 
                     'default', array('class' => 'message error')
                 );
             }
             
-            // set flash message according to data found
-            if (!empty( $data['error_cast'])) {
-                $this->Session->setFlash(
-                    __('Error retrieving IMDb data for the cast: %s.', $data["error_cast"]),
-                    'default', array('class' => 'message error')
-                );
-            } else if (!empty( $data['error_trivia'])) {
-                $this->Session->setFlash(
-                    __('Error retrieving IMDb data for the trivia: %s.', $data["error_trivia"]),
-                    'default', array('class' => 'message error')
-                );
-            } else {
-                $this->Session->setFlash(
+
+            $this->Session->setFlash(
                     __('The IMDb data for the film has been saved.'),
                     'default', array('class' => 'message success')
                 );
-            }
+
 
             // redirect to imdb data edit on success
             return $this->redirect(array('action' => 'imdb', $id, false));
